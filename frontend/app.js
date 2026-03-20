@@ -349,9 +349,20 @@ function connectWebSocket() {
     setConnectionStatus('connecting');
     ws = new WebSocket(url);
 
-    ws.onopen = () => setConnectionStatus('connected');
+    let pingInterval = null;
+
+    ws.onopen = () => {
+        setConnectionStatus('connected');
+        // 30秒ごとにpingを送信して接続を維持
+        pingInterval = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send('ping');
+            }
+        }, 30000);
+    };
 
     ws.onmessage = (event) => {
+        if (event.data === 'pong') return;
         const msg = JSON.parse(event.data);
         if (msg.type === 'new_alerts' && msg.alerts.length > 0) {
             prependAlerts(msg.alerts);
@@ -363,6 +374,7 @@ function connectWebSocket() {
 
     ws.onclose = () => {
         setConnectionStatus('disconnected');
+        if (pingInterval) clearInterval(pingInterval);
         setTimeout(connectWebSocket, 5000);
     };
 

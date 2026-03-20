@@ -205,7 +205,9 @@ async def websocket_endpoint(ws: WebSocket):
     logger.info(f"WebSocket接続: {len(ws_clients)}クライアント")
     try:
         while True:
-            await ws.receive_text()  # クライアントからのメッセージを待つ（keep-alive）
+            data = await ws.receive_text()
+            if data == "ping":
+                await ws.send_text("pong")
     except WebSocketDisconnect:
         pass
     finally:
