@@ -1,9 +1,11 @@
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -36,14 +38,34 @@ async def broadcast_alerts(alerts: list[dict]):
     ws_clients -= disconnected
 
 
+async def self_ping():
+    """Render無料プランのスリープを防止するため、自分自身に定期的にリクエストを送る。"""
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        logger.info("RENDER_EXTERNAL_URL未設定 - セルフpingスキップ")
+        return
+    health_url = f"{url}/health"
+    logger.info(f"セルフping開始: {health_url}")
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                await asyncio.sleep(300)  # 5分ごと
+                resp = await client.get(health_url, timeout=10)
+                logger.debug(f"セルフping: {resp.status_code}")
+            except Exception:
+                logger.debug("セルフpingエラー（無視）")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """アプリ起動時にDBを初期化し、RSS監視を開始する。"""
     await init_db()
     rss_monitor.on_new_alert = broadcast_alerts
     task = asyncio.create_task(rss_monitor.run_monitor(interval=10))
+    ping_task = asyncio.create_task(self_ping())
     yield
     task.cancel()
+    ping_task.cancel()
 
 
 app = FastAPI(title="Stock Alert App", lifespan=lifespan)
@@ -203,6 +225,17 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     ws_clients.add(ws)
     logger.info(f"WebSocket接続: {len(ws_clients)}クライアント")
+
+    async def server_ping():
+        """サーバーからも定期的にpingを送信して接続を維持する。"""
+        try:
+            while True:
+                await asyncio.sleep(20)
+                await ws.send_text("ping")
+        except Exception:
+            pass
+
+    ping_task = asyncio.create_task(server_ping())
     try:
         while True:
             data = await ws.receive_text()
@@ -210,7 +243,10 @@ async def websocket_endpoint(ws: WebSocket):
                 await ws.send_text("pong")
     except WebSocketDisconnect:
         pass
+    except Exception:
+        pass
     finally:
+        ping_task.cancel()
         ws_clients.discard(ws)
         logger.info(f"WebSocket切断: {len(ws_clients)}クライアント")
 

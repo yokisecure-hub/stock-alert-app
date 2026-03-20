@@ -333,6 +333,11 @@ function showToast(message, type = 'info') {
 
 // ── WebSocket接続 ───────────────────────────────────────
 
+let reconnectAttempts = 0;
+let pingInterval = null;
+let pongTimeout = null;
+let reconnectTimer = null;
+
 function setConnectionStatus(status) {
     const dot = connectionStatus.querySelector('.status-dot');
     const text = connectionStatus.querySelector('.status-text');
@@ -342,44 +347,115 @@ function setConnectionStatus(status) {
     text.textContent = labels[status];
 }
 
+function cleanupConnection() {
+    if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
+    if (pongTimeout) { clearTimeout(pongTimeout); pongTimeout = null; }
+}
+
+function scheduleReconnect() {
+    if (reconnectTimer) return;
+    // 再接続間隔: 1秒 → 2秒 → 4秒 → 最大10秒
+    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
+    reconnectAttempts++;
+    setConnectionStatus('disconnected');
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectWebSocket();
+    }, delay);
+}
+
 function connectWebSocket() {
+    // 既存の接続を片付ける
+    cleanupConnection();
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        ws.close();
+    }
+
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${protocol}//${location.host}/ws`;
 
     setConnectionStatus('connecting');
-    ws = new WebSocket(url);
 
-    let pingInterval = null;
+    try {
+        ws = new WebSocket(url);
+    } catch (e) {
+        scheduleReconnect();
+        return;
+    }
+
+    // 接続タイムアウト（10秒以内にonopenが来なければ再接続）
+    const connectTimeout = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+            ws.close();
+        }
+    }, 10000);
 
     ws.onopen = () => {
+        clearTimeout(connectTimeout);
         setConnectionStatus('connected');
-        // 30秒ごとにpingを送信して接続を維持
+        reconnectAttempts = 0;
+
+        // 15秒ごとにpingを送信して接続を維持
         pingInterval = setInterval(() => {
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send('ping');
+                // 5秒以内にpongが返ってこなければ接続が死んでいるとみなす
+                pongTimeout = setTimeout(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.close();
+                    }
+                }, 5000);
             }
-        }, 30000);
+        }, 15000);
     };
 
     ws.onmessage = (event) => {
-        if (event.data === 'pong') return;
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'new_alerts' && msg.alerts.length > 0) {
-            prependAlerts(msg.alerts);
-            playAlertSound();
-            showBrowserNotification(msg.alerts[0]);
-            showToast(`${msg.alerts.length}件の新着アラート`);
+        // pongまたはpingを受信したらタイムアウトをクリア
+        if (event.data === 'pong' || event.data === 'ping') {
+            if (pongTimeout) { clearTimeout(pongTimeout); pongTimeout = null; }
+            // サーバーからのpingにはpongを返す
+            if (event.data === 'ping' && ws.readyState === WebSocket.OPEN) {
+                ws.send('pong');
+            }
+            return;
+        }
+        try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'new_alerts' && msg.alerts.length > 0) {
+                prependAlerts(msg.alerts);
+                playAlertSound();
+                showBrowserNotification(msg.alerts[0]);
+                showToast(`${msg.alerts.length}件の新着アラート`);
+            }
+        } catch (e) {
+            // JSONパースエラーは無視
         }
     };
 
     ws.onclose = () => {
-        setConnectionStatus('disconnected');
-        if (pingInterval) clearInterval(pingInterval);
-        setTimeout(connectWebSocket, 5000);
+        clearTimeout(connectTimeout);
+        cleanupConnection();
+        scheduleReconnect();
     };
 
-    ws.onerror = () => ws.close();
+    ws.onerror = () => {
+        // oncloseが続いて呼ばれるので、ここでは何もしない
+    };
 }
+
+// ── ページ表示/非表示で接続管理 ──────────────────────────
+
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    // ページがアクティブに戻ったとき、接続が切れていれば即再接続
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        reconnectAttempts = 0;
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        connectWebSocket();
+    }
+    // アラートも最新を再取得
+    fetchAlerts();
+});
 
 // ── イベントハンドラ ────────────────────────────────────
 
