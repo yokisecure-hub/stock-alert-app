@@ -1,0 +1,48 @@
+/* 新着アラートのフラッシュアニメーション（注意系: 緑） */
+@keyframes alert-flash {
+    0% { background-color: rgba(16, 185, 129, 0.3); }
+    100% { background-color: transparent; }
+}
+.alert-new {
+    animation: alert-flash 2s ease-out;
+}
+
+/* 新着アラートのフラッシュアニメーション（ポジティブ: 赤） */
+@keyframes alert-flash-positive {
+    0% { background-color: rgba(239, 68, 68, 0.3); }
+    100% { background-color: transparent; }
+}
+.alert-new-positive {
+    animation: alert-flash-positive 2s ease-out;
+}
+
+/* トースト通知 */
+.toast-enter {
+    animation: toast-in 0.3s ease-out;
+}
+.toast-exit {
+    animation: toast-out 0.3s ease-in forwards;
+}
+@keyframes toast-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+@keyframes toast-out {
+    from { opacity: 1; transform: translateY(0); }
+    to { opacity: 0; transform: translateY(10px); }
+}
+
+/* スクロールバー */
+#keyword-list::-webkit-scrollbar,
+#alert-feed::-webkit-scrollbar {
+    width: 4px;
+}
+#keyword-list::-webkit-scrollbar-track,
+#alert-feed::-webkit-scrollbar-track {
+    background: transparent;
+}
+#keyword-list::-webkit-scrollbar-thumb,
+#alert-feed::-webkit-scrollbar-thumb {
+    background: #4b5563;
+    border-radius: 2px;
+}

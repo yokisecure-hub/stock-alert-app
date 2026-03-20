@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+backend/data/stock_alert.db
+.env

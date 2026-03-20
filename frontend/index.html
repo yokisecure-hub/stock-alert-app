@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Alert - ストップ高狙いデイトレード支援</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <header class="bg-gray-800 border-b border-gray-700 px-6 py-3">
+        <div class="max-w-7xl mx-auto flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <h1 class="text-xl font-bold text-emerald-400">Stock Alert</h1>
+                <span class="text-xs text-gray-500 hidden sm:inline">ストップ高狙いデイトレード支援</span>
+                <span class="text-[10px] bg-red-600/80 text-white rounded px-1.5 py-0.5 hidden sm:inline">LIVE 10秒更新</span>
+            </div>
+            <div class="flex items-center gap-2">
+                <div id="connection-status" class="text-xs text-gray-500 flex items-center gap-1">
+                    <span class="status-dot w-2 h-2 rounded-full bg-gray-500 inline-block"></span>
+                    <span class="status-text">未接続</span>
+                </div>
+                <button id="sound-toggle" title="アラート音ON"
+                    class="text-base px-2 py-1 rounded hover:bg-gray-700 transition-colors">🔔</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto p-4 sm:p-6">
+        <!-- 統計バー -->
+        <div class="grid grid-cols-3 gap-4 mb-6">
+            <div class="bg-gray-800 rounded-lg px-4 py-3 border border-gray-700 text-center">
+                <div id="stat-keywords" class="text-2xl font-bold text-emerald-400">0</div>
+                <div class="text-xs text-gray-500">有効キーワード</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg px-4 py-3 border border-gray-700 text-center">
+                <div id="stat-unread" class="text-2xl font-bold text-yellow-400">0</div>
+                <div class="text-xs text-gray-500">未読アラート</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg px-4 py-3 border border-gray-700 text-center">
+                <div id="stat-total" class="text-2xl font-bold text-gray-400">0</div>
+                <div class="text-xs text-gray-500">総アラート</div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            <!-- マジックワード管理パネル -->
+            <section class="lg:col-span-1 bg-gray-800 rounded-lg p-4 border border-gray-700 self-start">
+                <h2 class="text-base font-semibold mb-3 text-emerald-400">マジックワード</h2>
+                <div id="keyword-form" class="mb-4">
+                    <input type="text" id="keyword-input" placeholder="キーワード"
+                        class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm mb-2 focus:outline-none focus:border-emerald-500">
+                    <input type="text" id="category-input" placeholder="カテゴリ（例: AI, 半導体）"
+                        class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm mb-2 focus:outline-none focus:border-emerald-500">
+                    <button id="add-keyword-btn"
+                        class="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded px-4 py-2 text-sm font-medium transition-colors">
+                        追加
+                    </button>
+                </div>
+                <!-- カテゴリフィルタ -->
+                <div id="category-filters" class="flex flex-wrap gap-1.5 mb-3"></div>
+                <ul id="keyword-list" class="space-y-1.5 max-h-[50vh] overflow-y-auto">
+                </ul>
+            </section>
+
+            <!-- アラートフィード -->
+            <section class="lg:col-span-3 bg-gray-800 rounded-lg p-4 border border-gray-700">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-base font-semibold text-emerald-400">アラートフィード</h2>
+                    <div class="flex items-center gap-2">
+                        <!-- キーワードフィルタ -->
+                        <select id="alert-keyword-filter"
+                            class="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-xs focus:outline-none focus:border-emerald-500">
+                            <option value="">すべて</option>
+                        </select>
+                        <button id="mark-all-read-btn"
+                            class="text-xs text-gray-400 hover:text-gray-200 border border-gray-600 rounded px-2 py-1 transition-colors">
+                            全て既読
+                        </button>
+                    </div>
+                </div>
+                <div id="alert-feed" class="space-y-2 max-h-[70vh] overflow-y-auto">
+                    <p class="text-gray-500 text-sm text-center py-8">アラートはまだありません</p>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
