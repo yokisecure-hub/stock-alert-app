@@ -6,9 +6,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from sse_starlette.sse import EventSourceResponse
 
 from database import init_db, get_db
 from models import MagicWordCreate, MagicWordUpdate, MagicWordResponse, AlertResponse
@@ -19,27 +20,27 @@ logger = logging.getLogger(__name__)
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
-# ── WebSocket接続管理 ────────────────────────────────────
+# ── SSE接続管理 ─────────────────────────────────────────
 
-ws_clients: set[WebSocket] = set()
+sse_queues: set[asyncio.Queue] = set()
 
 
 async def broadcast_alerts(alerts: list[dict]):
-    """全WebSocketクライアントにアラートを送信する。"""
-    if not ws_clients or not alerts:
+    """全SSEクライアントにアラートを送信する。"""
+    if not sse_queues or not alerts:
         return
     payload = json.dumps({"type": "new_alerts", "alerts": alerts}, ensure_ascii=False)
-    disconnected = set()
-    for ws in ws_clients:
+    dead = set()
+    for q in sse_queues:
         try:
-            await ws.send_text(payload)
+            q.put_nowait(payload)
         except Exception:
-            disconnected.add(ws)
-    ws_clients -= disconnected
+            dead.add(q)
+    sse_queues -= dead
 
 
 async def self_ping():
-    """Render無料プランのスリープを防止するため、自分自身に定期的にリクエストを送る。"""
+    """Render無料プランのスリープを防止するため自分自身に定期リクエストを送る。"""
     url = os.environ.get("RENDER_EXTERNAL_URL")
     if not url:
         logger.info("RENDER_EXTERNAL_URL未設定 - セルフpingスキップ")
@@ -49,7 +50,7 @@ async def self_ping():
     async with httpx.AsyncClient() as client:
         while True:
             try:
-                await asyncio.sleep(300)  # 5分ごと
+                await asyncio.sleep(300)
                 resp = await client.get(health_url, timeout=10)
                 logger.debug(f"セルフping: {resp.status_code}")
             except Exception:
@@ -61,10 +62,10 @@ async def lifespan(app: FastAPI):
     """アプリ起動時にDBを初期化し、RSS監視を開始する。"""
     await init_db()
     rss_monitor.on_new_alert = broadcast_alerts
-    task = asyncio.create_task(rss_monitor.run_monitor(interval=10))
+    monitor_task = asyncio.create_task(rss_monitor.run_monitor(interval=10))
     ping_task = asyncio.create_task(self_ping())
     yield
-    task.cancel()
+    monitor_task.cancel()
     ping_task.cancel()
 
 
@@ -76,7 +77,6 @@ app = FastAPI(title="Stock Alert App", lifespan=lifespan)
 
 @app.get("/api/keywords", response_model=list[MagicWordResponse])
 async def list_keywords():
-    """マジックワード一覧を取得する。"""
     db = await get_db()
     try:
         rows = await db.execute_fetchall(
@@ -89,11 +89,9 @@ async def list_keywords():
 
 @app.post("/api/keywords", response_model=MagicWordResponse, status_code=201)
 async def create_keyword(body: MagicWordCreate):
-    """マジックワードを登録する。"""
     keyword = body.keyword.strip()
     if not keyword:
         raise HTTPException(status_code=400, detail="キーワードを入力してください")
-
     db = await get_db()
     try:
         existing = await db.execute_fetchall(
@@ -101,13 +99,11 @@ async def create_keyword(body: MagicWordCreate):
         )
         if existing:
             raise HTTPException(status_code=409, detail="このキーワードは既に登録されています")
-
         cursor = await db.execute(
             "INSERT INTO magic_words (keyword, category) VALUES (?, ?)",
             (keyword, body.category.strip()),
         )
         await db.commit()
-
         row = await db.execute_fetchall(
             "SELECT id, keyword, category, is_active, created_at FROM magic_words WHERE id = ?",
             (cursor.lastrowid,),
@@ -119,7 +115,6 @@ async def create_keyword(body: MagicWordCreate):
 
 @app.put("/api/keywords/{keyword_id}", response_model=MagicWordResponse)
 async def update_keyword(keyword_id: int, body: MagicWordUpdate):
-    """マジックワードを更新する。"""
     db = await get_db()
     try:
         existing = await db.execute_fetchall(
@@ -127,26 +122,17 @@ async def update_keyword(keyword_id: int, body: MagicWordUpdate):
         )
         if not existing:
             raise HTTPException(status_code=404, detail="キーワードが見つかりません")
-
-        updates = []
-        params = []
+        updates, params = [], []
         if body.keyword is not None:
-            updates.append("keyword = ?")
-            params.append(body.keyword.strip())
+            updates.append("keyword = ?"); params.append(body.keyword.strip())
         if body.category is not None:
-            updates.append("category = ?")
-            params.append(body.category.strip())
+            updates.append("category = ?"); params.append(body.category.strip())
         if body.is_active is not None:
-            updates.append("is_active = ?")
-            params.append(body.is_active)
-
+            updates.append("is_active = ?"); params.append(body.is_active)
         if updates:
             params.append(keyword_id)
-            await db.execute(
-                f"UPDATE magic_words SET {', '.join(updates)} WHERE id = ?", params
-            )
+            await db.execute(f"UPDATE magic_words SET {', '.join(updates)} WHERE id = ?", params)
             await db.commit()
-
         row = await db.execute_fetchall(
             "SELECT id, keyword, category, is_active, created_at FROM magic_words WHERE id = ?",
             (keyword_id,),
@@ -158,7 +144,6 @@ async def update_keyword(keyword_id: int, body: MagicWordUpdate):
 
 @app.delete("/api/keywords/{keyword_id}", status_code=204)
 async def delete_keyword(keyword_id: int):
-    """マジックワードを削除する。"""
     db = await get_db()
     try:
         existing = await db.execute_fetchall(
@@ -166,7 +151,6 @@ async def delete_keyword(keyword_id: int):
         )
         if not existing:
             raise HTTPException(status_code=404, detail="キーワードが見つかりません")
-
         await db.execute("DELETE FROM magic_words WHERE id = ?", (keyword_id,))
         await db.commit()
     finally:
@@ -178,7 +162,6 @@ async def delete_keyword(keyword_id: int):
 
 @app.get("/api/alerts", response_model=list[AlertResponse])
 async def list_alerts(limit: int = Query(default=50, le=200)):
-    """アラート一覧を取得する（新しい順）。"""
     db = await get_db()
     try:
         rows = await db.execute_fetchall(
@@ -194,7 +177,6 @@ async def list_alerts(limit: int = Query(default=50, le=200)):
 
 @app.put("/api/alerts/{alert_id}/read")
 async def mark_alert_read(alert_id: int):
-    """アラートを既読にする。"""
     db = await get_db()
     try:
         await db.execute("UPDATE alerts SET is_read = 1 WHERE id = ?", (alert_id,))
@@ -206,7 +188,6 @@ async def mark_alert_read(alert_id: int):
 
 @app.put("/api/alerts/read-all")
 async def mark_all_alerts_read():
-    """全アラートを既読にする。"""
     db = await get_db()
     try:
         cursor = await db.execute("UPDATE alerts SET is_read = 1 WHERE is_read = 0")
@@ -216,39 +197,33 @@ async def mark_all_alerts_read():
         await db.close()
 
 
-# ── WebSocket ────────────────────────────────────────────
+# ── SSE (Server-Sent Events) ─────────────────────────────
 
 
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    """WebSocket接続を受け付け、アラートをリアルタイム配信する。"""
-    await ws.accept()
-    ws_clients.add(ws)
-    logger.info(f"WebSocket接続: {len(ws_clients)}クライアント")
+@app.get("/api/stream")
+async def sse_stream(request: Request):
+    """SSEでアラートをリアルタイム配信する。ブラウザが自動再接続を行う。"""
+    queue: asyncio.Queue = asyncio.Queue()
+    sse_queues.add(queue)
+    logger.info(f"SSE接続: {len(sse_queues)}クライアント")
 
-    async def server_ping():
-        """サーバーからも定期的にpingを送信して接続を維持する。"""
+    async def event_generator():
         try:
             while True:
-                await asyncio.sleep(20)
-                await ws.send_text("ping")
-        except Exception:
-            pass
+                # クライアント切断を検知
+                if await request.is_disconnected():
+                    break
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=15)
+                    yield {"event": "alert", "data": data}
+                except asyncio.TimeoutError:
+                    # 15秒ごとにkeep-aliveコメントを送信（接続維持）
+                    yield {"comment": "keep-alive"}
+        finally:
+            sse_queues.discard(queue)
+            logger.info(f"SSE切断: {len(sse_queues)}クライアント")
 
-    ping_task = asyncio.create_task(server_ping())
-    try:
-        while True:
-            data = await ws.receive_text()
-            if data == "ping":
-                await ws.send_text("pong")
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        ping_task.cancel()
-        ws_clients.discard(ws)
-        logger.info(f"WebSocket切断: {len(ws_clients)}クライアント")
+    return EventSourceResponse(event_generator())
 
 
 # ── 静的ファイル・ページ ─────────────────────────────────
@@ -258,7 +233,6 @@ app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 @app.get("/")
 async def index():
-    """メインページを返す。"""
     return FileResponse(FRONTEND_DIR / "index.html")
 
 

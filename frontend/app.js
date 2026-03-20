@@ -20,10 +20,10 @@ const statTotal = document.getElementById('stat-total');
 // ── 状態 ────────────────────────────────────────────────
 
 let soundEnabled = true;
-let ws = null;
+let eventSource = null;
 let allKeywords = [];
 let allAlerts = [];
-let selectedCategory = '';  // 空文字 = 全表示
+let selectedCategory = '';
 
 // ── ユーティリティ ──────────────────────────────────────
 
@@ -231,7 +231,6 @@ function renderAlertItem(a) {
     const positive = isPositiveAlert(a.category);
     const title = highlightKeyword(a.title, a.keyword, positive);
 
-    // ポジティブ: 赤系、注意系: 緑系
     const borderColor = a.is_read ? 'border-gray-600' : (positive ? 'border-red-500' : 'border-emerald-500');
     const bgColor = a.is_read ? 'bg-gray-700/30' : 'bg-gray-700/70';
     const badgeBg = positive ? 'bg-red-600/80' : 'bg-emerald-600/80';
@@ -271,12 +270,10 @@ function renderAlerts() {
 }
 
 function prependAlerts(newAlerts) {
-    // allAlertsの先頭に追加
     allAlerts = [...newAlerts, ...allAlerts];
     updateStats();
     updateAlertKeywordFilter();
 
-    // DOM更新
     const placeholder = alertFeed.querySelector('p.text-gray-500');
     if (placeholder) placeholder.remove();
 
@@ -331,12 +328,7 @@ function showToast(message, type = 'info') {
     }, 2500);
 }
 
-// ── WebSocket接続 ───────────────────────────────────────
-
-let reconnectAttempts = 0;
-let pingInterval = null;
-let pongTimeout = null;
-let reconnectTimer = null;
+// ── SSE接続（Server-Sent Events） ───────────────────────
 
 function setConnectionStatus(status) {
     const dot = connectionStatus.querySelector('.status-dot');
@@ -347,78 +339,20 @@ function setConnectionStatus(status) {
     text.textContent = labels[status];
 }
 
-function cleanupConnection() {
-    if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
-    if (pongTimeout) { clearTimeout(pongTimeout); pongTimeout = null; }
-}
-
-function scheduleReconnect() {
-    if (reconnectTimer) return;
-    // 再接続間隔: 1秒 → 2秒 → 4秒 → 最大10秒
-    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
-    reconnectAttempts++;
-    setConnectionStatus('disconnected');
-    reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        connectWebSocket();
-    }, delay);
-}
-
-function connectWebSocket() {
-    // 既存の接続を片付ける
-    cleanupConnection();
-    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-        ws.close();
+function connectSSE() {
+    if (eventSource) {
+        eventSource.close();
     }
-
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${location.host}/ws`;
 
     setConnectionStatus('connecting');
+    eventSource = new EventSource('/api/stream');
 
-    try {
-        ws = new WebSocket(url);
-    } catch (e) {
-        scheduleReconnect();
-        return;
-    }
-
-    // 接続タイムアウト（10秒以内にonopenが来なければ再接続）
-    const connectTimeout = setTimeout(() => {
-        if (ws.readyState !== WebSocket.OPEN) {
-            ws.close();
-        }
-    }, 10000);
-
-    ws.onopen = () => {
-        clearTimeout(connectTimeout);
+    eventSource.onopen = () => {
         setConnectionStatus('connected');
-        reconnectAttempts = 0;
-
-        // 15秒ごとにpingを送信して接続を維持
-        pingInterval = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send('ping');
-                // 5秒以内にpongが返ってこなければ接続が死んでいるとみなす
-                pongTimeout = setTimeout(() => {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.close();
-                    }
-                }, 5000);
-            }
-        }, 15000);
     };
 
-    ws.onmessage = (event) => {
-        // pongまたはpingを受信したらタイムアウトをクリア
-        if (event.data === 'pong' || event.data === 'ping') {
-            if (pongTimeout) { clearTimeout(pongTimeout); pongTimeout = null; }
-            // サーバーからのpingにはpongを返す
-            if (event.data === 'ping' && ws.readyState === WebSocket.OPEN) {
-                ws.send('pong');
-            }
-            return;
-        }
+    // カスタムイベント "alert" を受信
+    eventSource.addEventListener('alert', (event) => {
         try {
             const msg = JSON.parse(event.data);
             if (msg.type === 'new_alerts' && msg.alerts.length > 0) {
@@ -428,18 +362,14 @@ function connectWebSocket() {
                 showToast(`${msg.alerts.length}件の新着アラート`);
             }
         } catch (e) {
-            // JSONパースエラーは無視
+            // パースエラーは無視
         }
-    };
+    });
 
-    ws.onclose = () => {
-        clearTimeout(connectTimeout);
-        cleanupConnection();
-        scheduleReconnect();
-    };
-
-    ws.onerror = () => {
-        // oncloseが続いて呼ばれるので、ここでは何もしない
+    eventSource.onerror = () => {
+        setConnectionStatus('disconnected');
+        // EventSourceはブラウザが自動的に再接続を試みる（数秒後）
+        // 接続状態が変わったらonopenで「接続中」に戻る
     };
 }
 
@@ -447,15 +377,20 @@ function connectWebSocket() {
 
 document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
-    // ページがアクティブに戻ったとき、接続が切れていれば即再接続
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-        reconnectAttempts = 0;
-        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-        connectWebSocket();
+    // ページがアクティブに戻ったとき、接続が切れていれば再接続
+    if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
+        connectSSE();
     }
     // アラートも最新を再取得
     fetchAlerts();
 });
+
+// ── ポーリングフォールバック ─────────────────────────────
+// SSEが効いていても30秒ごとにアラートを取得（取りこぼし防止）
+
+setInterval(() => {
+    fetchAlerts();
+}, 30000);
 
 // ── イベントハンドラ ────────────────────────────────────
 
@@ -508,6 +443,6 @@ soundToggle.addEventListener('click', () => {
 document.addEventListener('DOMContentLoaded', () => {
     fetchKeywords();
     fetchAlerts();
-    connectWebSocket();
+    connectSSE();
     requestNotificationPermission();
 });
